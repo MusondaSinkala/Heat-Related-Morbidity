@@ -1,0 +1,108 @@
+//************* 0. Define NYC as the Area of Interest and Import Zip Codes *************//
+
+// Define NYC as the area of interest (aoi)
+var nycBounds = ee.Geometry.Polygon([
+  [
+    [-74.2591, 40.4774], // Southwest corner of NYC
+    [-73.7004, 40.4774], // Southeast corner
+    [-73.7004, 40.9176], // Northeast corner
+    [-74.2591, 40.9176], // Northwest corner
+  ]
+]);
+
+var aoi = nycBounds;
+
+// Import zip code boundaries
+var zipCodes = ee.FeatureCollection('TIGER/2010/ZCTA5')  // Importing zip code boundaries
+  .filterBounds(aoi); // Ensure it is within NYC boundaries
+
+// Cloud mask function for Landsat 8 & 9
+function cloudMask(image) {
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(1 << 3).or(qa.bitwiseAnd(1 << 4));
+  return image.updateMask(mask.not());
+}
+
+// Import Landsat 8 and 9 data
+var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .select('ST_B10', 'QA_PIXEL')
+  .filterBounds(aoi)
+  .filter(ee.Filter.lt('CLOUD_COVER', 30))
+  .map(cloudMask);
+
+var L9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+  .select('ST_B10', 'QA_PIXEL')
+  .filterBounds(aoi)
+  .filter(ee.Filter.lt('CLOUD_COVER', 30))
+  .map(cloudMask);
+
+var filtered = L8.merge(L9).sort('system:time_start');
+
+// Apply scale factors for surface temperature in Celsius
+function applyScaleFactors(image) {
+  var thermalBands = image.select('ST_B10').multiply(0.00341802).add(149).subtract(273.15); // Convert to Celsius
+  return image.addBands(thermalBands, null, true);
+}
+
+filtered = filtered.map(applyScaleFactors);
+
+//****************** 1. Calculate daily maximum LST for each pixel *****************//
+
+var startDate = ee.Date('2024-01-01');
+var endDate = ee.Date('2024-04-30');
+var dateRange = ee.List.sequence(0, endDate.difference(startDate, 'day').subtract(1), 1)
+  .map(function(dayOffset) {
+    return startDate.advance(dayOffset, 'day');
+  });
+
+function LST_max(day) {
+  var day = ee.Date(day);
+  var maxLST = filtered
+    .filterDate(day, day.advance(1, 'day'))  // Filter by exact date
+    .max() // Get maximum temperature for the given day
+    .set('year', day.get('year'))
+    .set('month', day.get('month'))
+    .set('day', day.get('day'));
+
+  return maxLST;
+}
+
+var LST_max_by_day = ee.ImageCollection.fromImages(dateRange.map(LST_max));
+
+//****************** 2. Calculate trends for each pixel *****************//
+
+var createDayMonthYearBands = function (image) {
+  return image.addBands([image.metadata("year"), image.metadata("month"), image.metadata("day")]);
+};
+
+LST_max_by_day = LST_max_by_day.map(createDayMonthYearBands);
+
+var linearFit = LST_max_by_day.select(['year', 'ST_B10']).reduce(ee.Reducer.linearFit());
+
+//****************** 3. Calculate daily LST per Zip Code *****************//
+
+var reduceRegions = function(image) {
+  return image.reduceRegions({
+    collection: zipCodes,
+    reducer: ee.Reducer.median(), // Median temperature per zip code
+    scale: 30,
+  })
+  .filter(ee.Filter.notNull(['ST_B10']))
+  .map(function(feature) {
+    return feature
+      .select(['ZCTA5CE10', 'year', 'month', 'day', 'ST_B10'], ['zip_code', 'year', 'month', 'day', 'meanLST']);
+  });
+};
+
+var LSTmax_reduceRegions = LST_max_by_day.map(reduceRegions).flatten();
+
+// Export mean LST per zip code by day for the specified period
+Export.table.toDrive({
+  collection: LSTmax_reduceRegions,
+  description: 'LSTmax_per_ZipCode_Jan_to_Apr_2024',
+  folder: 'Heat-Health Project',
+  fileFormat: 'CSV',
+  selectors: ['zip_code', 'year', 'month', 'day', 'meanLST'],
+});
+
+print("Done");
