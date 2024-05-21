@@ -7,7 +7,7 @@ import sqlite3
 from shapely.ops import unary_union
 from flatten_polygon import flatten_multipolygon
 
-## Displa full ouptut in pycharm console
+## Display full ouptut in pycharm console
 pd.set_option('display.max_rows', None)            # Display all rows
 pd.set_option('display.max_columns', None)         # Display all columns
 pd.set_option('display.width', None)               # No truncation of content

@@ -4,8 +4,8 @@ import polars as pl
 import seaborn as sns
 import matplotlib.pyplot as plt
 from datetime import datetime
-from Map import create_map
-from Geographical_Data import to_geodataframe
+from CodeBase.data_exploration.map import create_map
+from CodeBase.data_preparation.geographical_data import to_geodataframe
 
 ## Displa full ouptut in pycharm console
 pd.set_option('display.max_rows', None)            # Display all rows
