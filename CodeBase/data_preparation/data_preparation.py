@@ -2,16 +2,20 @@
 import os
 import numpy as np
 import pandas as pd
+import polars as pl
 import geopandas as gpd
 import sqlite3
 from shapely.ops import unary_union
-from flatten_polygon import flatten_multipolygon
+from CodeBase.data_preparation.flatten_polygon import flatten_multipolygon
 
 ## Display full ouptut in pycharm console
 pd.set_option('display.max_rows', None)            # Display all rows
 pd.set_option('display.max_columns', None)         # Display all columns
 pd.set_option('display.width', None)               # No truncation of content
 pd.set_option('display.expand_frame_repr', False)  # Don't wrap DataFrame display
+
+pl.Config.set_tbl_cols(30)  # Display up to 40 columns
+pl.Config.set_tbl_rows(30)  # Display up to 40 rows
 
 ########## Read in the data
 
@@ -21,7 +25,7 @@ demographics      = cwd + f"\\Data\\Demographics_2022.csv"
 nyc_zip_shapefile = cwd + f"\\Shapefiles\\tl_2020_us_zcta520.shp"
 nyc_zip_codes     = cwd + f"\\Shapefiles\\nyc_zip_codes.txt"
 ED                = cwd + f"\\Data\\Daily Data\\ER visits.csv"
-LST               = cwd + f"\\Data\\Daily Data\\Raw Data\\Land Surface Temperature.csv"
+weather           = cwd + f"\\Data\\Daily Data\\Daily Weather Data.csv"
 zip_mapping       = {
     10001: 10036, 10003: 10003, 10005: 10038, 10006: 10038, 10007: 10038,
     10012: 10003, 10017: 10016, 10018: 10036,
@@ -41,10 +45,19 @@ zip_mapping       = {
     11691: 11691, 11692: 11691, 11693: 11693, 11694: 11693, 11697: 11693
 }
 
-# ED = pd.read_csv(cwd + f"\\Data\\full_data.csv")
-ED                = pd.read_csv(ED)
-LST               = pd.read_csv(LST)
-demographics      = pd.read_csv(demographics)
+ED      = pl.read_csv(ED)
+weather = pl.read_csv(weather, null_values = ["0"])
+weather = weather.with_columns(pl.col("date").str.strptime(pl.Date, "%d-%m-%y").alias("date"),
+                               pl.col("date").str.strptime(pl.Date, "%d-%m-%y").dt.year().alias("Year"),
+                               pl.col("date").str.strptime(pl.Date, "%d-%m-%y").dt.month().alias("Month"),
+                               pl.col("date").str.strptime(pl.Date, "%d-%m-%y").dt.day().alias("Day"),
+                               pl.col("dayl").fill_null(0),
+                               pl.col("prcp").cast(pl.Float64).fill_null(0),
+                               pl.col("tmax").fill_null(0),
+                               pl.col("vp").fill_null(0))
+weather = weather.rename({"GEOID10": "Zip", "date": "Date"})
+weather = weather.select(["Date", "Year", "Month", "Day", "Zip", "dayl", "prcp", "tmax", "vp"])
+demographics = pl.read_csv(demographics)
 # nyc_zip_gdf       = gpd.read_file(nyc_zip_shapefile) # Load the shapefile
 # Load the NYC zip codes
 with open(nyc_zip_codes, "r") as file:
@@ -53,75 +66,48 @@ zip_codes = [int(zip_code) for zip_code in zip_codes if zip_code]
 
 ########## Data Manipulation
 
-#### Non-Map Data Manipulation
+#### Combine weather data with ER Data
 
-# ED = ED.dropna(subset = ['Zip'])
-# ED = ED.drop(ED.columns[:1], axis = 1) # Drop the first three columns
-# ED['Date'] = pd.to_datetime(ED['Date'], dayfirst = True, errors = 'coerce')
-# ED['Date'] = pd.to_datetime(ED['Date'], format = "%d-%m-%y") # Convert the 'Date' column in ED to a proper date format
-# ED.columns = ["Zip", "Dim2Value", "Age_Group",
-#               "Date", "Count", "Anticipated_Cause"] # Rename the 6th column to "Age Group"
-
-ED          = ED.drop(ED.columns[:3], axis = 1) # Drop the first three columns
-ED          = ED.drop("Dim2Value", axis = 1) # Drop the 2nd column
-ED['Date']  = pd.to_datetime(ED['Date'], format="%b-%y") # Convert the 'Date' column in ED to a proper date format
-# ED['Date']  = pd.to_datetime(ED['Date'])
-# ED['Day']   = ED['Date'].dt.day
-ED['Month'] = ED['Date'].dt.month  # Extract the month
-ED['Year']  = ED['Date'].dt.year  # Extract the year
-
-# Create a new 'date' column in LST by concatenating the 'year' and 'month' columns
-LST['Date'] = pd.to_datetime(LST[['year', 'month']].assign(day = 1))  # Adding a day value for complete date
-LST.columns = ["Zip", "Year", "Month",
-               "Max_LST", "Date"] # Rename zip code
-LST['year'] = LST['year'].astype(int)
-LST['month'] = LST['month'].astype(int)
-LST['day'] = LST['day'].astype(int)
-
-ED.head()
-LST.head()
+ED.head(2)
+weather.head(2)
 
 # Connect to an SQLite database in memory
 connection = sqlite3.connect(":memory:")
 
 # Save dataframes to the SQLite database
-ED.to_sql("ED", connection, index = False, if_exists = "replace")
-LST.to_sql("LST", connection, index = False, if_exists = "replace")
+ED.to_pandas().to_sql("ED", connection, index = False, if_exists = "replace")
+weather.to_pandas().to_sql("WEATHER", connection, index = False, if_exists = "replace")
 
 # SQL query to join ED and LST on date and zip code
 sql_query = """ select e.Date as date,
-                       cast(e.Zip as int) as zip,
-                       sum(e.Count) as visits,
-                       max(l.meanLST) as max_lst
+                       e.Year as year,
+                       e.Month as month,
+                       e.Day as day,
+                       e.Zip as zip,
+                       sum(e.Ages0to4) as Ages0to4,
+                       sum(e.Ages5to17) as Ages5to17,
+                       sum(e.Ages18to64) as Ages18to64,
+                       sum(e.Ages65Plus) as Ages65Plus,
+                       sum(e.Total) as Total,
+                       max(w.dayl) as dayl,
+                       max(w.prcp) as prcp,
+                       max(w.tmax) as tmax,
+                       max(w.vp) as vp
                 from ED e
-                left join LST l
-                       on e.Year = l.year
-                      and e.Month = l.month
-                      and e.Day = l.day
-                      and cast(e.Zip as int) = l.zip_code
-                where e.Year = 2023
-                  and e.Month in (5, 6, 7, 8)
-                group by 1, 2
+                left join WEATHER w
+                       on e.Year  = w.year
+                      and e.Month = w.month
+                      and e.Day   = w.day
+                      and cast(e.Zip as int) = w.Zip
+                group by 1, 2, 3, 4, 5
             """
-# sql_query = """ select l.Date as date,
-#                        e.Zip as ZIPCODE,
-#                        sum(e.Count) as visits,
-#                        max(l.Max_LST) as max_lst
-#                 from ED e
-#                 inner join LST l
-#                         on e.Month = l.Month
-#                        and e.Year = l.Year
-#                        and e.Zip = l.Zip
-#                 group by 1, 2
-#                 order by 1, 2
-#             """
-# Execute the SQL query
-df = pd.read_sql_query(sql_query, connection)
+df         = pd.read_sql_query(sql_query, connection) # Execute the SQL query
 df['date'] = pd.to_datetime(df['date'])
-df['date'] = df['date'].dt.strftime('%b-%Y')
+df['zip']  = df['zip'].map(zip_mapping).fillna(df['zip']) # Apply the mapping to the 'zip' column
+df.head(1)
 
-# Apply the mapping to the 'zip' column
-df['ZIPCODE'] = df['ZIPCODE'].map(zip_mapping).fillna(df['ZIPCODE'])
+output_file = cwd + f"\\Data\\Daily Data\\Consolidated.csv"  # Name of the output file
+df.to_csv(output_file, index = False)  # Export to csv without row indices
 
 #### Map Data Manipulation
 

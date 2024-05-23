@@ -19,11 +19,11 @@ ee.Initialize(credentials) # Initialize Earth Engine
 
 ########## Extract Data
 
-start   = '2023-05-01'
-end     = '2023-08-31'
+start   = '2023-01-01'
+end     = '2024-01-01'
 dataset = ee.ImageCollection('NASA/ORNL/DAYMET_V4').filterDate(start, end)
 
-variables = dataset.select(['tmax', 'prcp', 'dayl', 'vp'])
+variables = dataset.select(['tmax', 'tmin', 'prcp', 'dayl', 'vp', 'srad'])
 
 # Define the area of interest - NYC
 nyc_aoi = ee.Geometry.Rectangle([-74.25559, 40.49612, -73.70001, 40.91553])
@@ -54,7 +54,7 @@ for date_millis in date_range.getInfo():
     max_variables = variables_day.max().clip(nyc_aoi)
 
     # Sample the image within the AOI and reduce by median
-    samples = max_variables.reduceRegions(collection=nyc_zip_codes, reducer=ee.Reducer.median(), scale=scale)
+    samples = max_variables.reduceRegions(collection = nyc_zip_codes, reducer = ee.Reducer.median(), scale = scale)
 
     # Get the results for the specific date
     result = samples.getInfo()
@@ -70,11 +70,13 @@ for date_millis in date_range.getInfo():
             'dayl': properties['dayl'],
             'prcp': properties['prcp'],
             'tmax': properties['tmax'],
-            'vp': properties['vp']
+            'tmin': properties['tmin'],
+            'vp': properties['vp'],
+            'srad': properties['srad']
         }
         selected_properties.append(selected)
 
 df = pl.DataFrame(selected_properties)
-print(df.head(10))
+print(df.tail(348))
 
-df.write_csv(cwd + '\\Data\\Daily Data\\Daily Weather Data.csv')
+df.write_csv(cwd + '\\Data\\Daily Data\\Raw Data\\Weather Data\\Daily Weather Data (2024 YTD).csv')
